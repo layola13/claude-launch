@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 claude-launch contributors
+# 仅供学习与研究使用；其他用途后果自负。
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [[ -L "$SOURCE" ]]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+
+ROOT="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+MAIN="$ROOT/main.py"
+
+if [[ ! -f "$MAIN" ]]; then
+  echo "error: main.py not found next to claude-launch at $ROOT" >&2
+  echo "Run ./install.sh from the claude-launch repo to install the generated wrapper." >&2
+  exit 127
+fi
+
+exec python3 "$MAIN" "$@"
