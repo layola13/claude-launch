@@ -13,6 +13,7 @@ import main  # noqa: E402
 class TranslationTests(unittest.TestCase):
     def setUp(self) -> None:
         main.TARGET_MODEL = "gpt-5.4"
+        main.MODEL_MAP = {"*": "gpt-5.4"}
         main.CLAUDE_CLI_MODEL = "claude-sonnet-5"
         main.CLAUDE_CLI_EFFORT = ""
         main.DEFAULT_REASONING_EFFORT = ""
@@ -87,6 +88,42 @@ class TranslationTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["reasoning_effort"], "high")
+
+    def test_request_model_maps_to_configured_upstream_model(self) -> None:
+        main.MODEL_MAP = {
+            "*": "fallback-model",
+            "claude-opus-4.1": "gpt-5.4",
+            "claude-opus-*": "gpt-5.4-opus",
+            "sonnet": "gpt-5.4-mini",
+        }
+
+        payload = main.anthropic_payload_to_openai(
+            {
+                "model": "claude-opus-4.1",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            },
+            stream=False,
+        )
+
+        self.assertEqual(payload["model"], "gpt-5.4")
+
+        wildcard_payload = main.anthropic_payload_to_openai(
+            {
+                "model": "claude-opus-4-8",
+                "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+            },
+            stream=False,
+        )
+
+        self.assertEqual(wildcard_payload["model"], "gpt-5.4-opus")
+
+    def test_exec_alias_becomes_print_mode_with_default_model(self) -> None:
+        main.CLAUDE_CLI_MODEL = "claude-sonnet-5"
+        main.CLAUDE_CLI_EFFORT = "high"
+
+        args = main.prepare_claude_args(["exec", "hello"])
+
+        self.assertEqual(args, ["--effort", "high", "--model", "claude-sonnet-5", "-p", "hello"])
 
     def test_openai_response_becomes_anthropic_message(self) -> None:
         response = main.openai_response_to_anthropic(

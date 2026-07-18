@@ -50,7 +50,7 @@ Shell `export` still wins over any `.env` file.
 | Variable | Meaning |
 |----------|---------|
 | `CLAUDE_LAUNCH_BASE_URL` | OpenAI-compatible base, e.g. `https://gateway.example/v1` |
-| `CLAUDE_LAUNCH_MODEL` | Real upstream model string sent to `/chat/completions` |
+| `CLAUDE_LAUNCH_MODEL` | Default real upstream model string sent to `/chat/completions` |
 | `CLAUDE_LAUNCH_API_KEY` | Bearer token for the upstream gateway |
 
 ### Optional
@@ -58,6 +58,7 @@ Shell `export` still wins over any `.env` file.
 | Variable | Meaning |
 |----------|---------|
 | `CLAUDE_LAUNCH_CLI_MODEL` | Injected as `claude --model` when you do not pass `--model`; default `claude-sonnet-5` |
+| `CLAUDE_LAUNCH_MODEL_MAP_JSON` | Maps Claude request model names to upstream model names; defaults to `{"*":"CLAUDE_LAUNCH_MODEL"}` |
 | `CLAUDE_LAUNCH_CLI_EFFORT` | Injected as `claude --effort` when you do not pass `--effort` |
 | `CLAUDE_LAUNCH_MODEL_DISPLAY_NAME` | Displayed by the local `/v1/models` route |
 | `CLAUDE_LAUNCH_USER_AGENT` | Upstream HTTP `User-Agent`; default `curl/8.5.0` |
@@ -68,6 +69,8 @@ Shell `export` still wins over any `.env` file.
 | `CLAUDE_LAUNCH_VERBOSE=1` | Log proxy details |
 | `CLAUDE_LAUNCH_PORT` | Fixed proxy port |
 | `CLAUDE_LAUNCH_DEBUG_DIR` | Directory for request/response debug dumps |
+| `CLAUDE_LAUNCH_CAPTURE_LOG=1` | Append redacted JSONL capture logs |
+| `CLAUDE_LAUNCH_CAPTURE_LOG_FILE` | Capture log path; default `CLAUDE_LAUNCH_DEBUG_DIR/capture.jsonl` |
 
 ### `.env` load priority
 
@@ -99,6 +102,26 @@ CLAUDE_LAUNCH_CLI_EFFORT=high claude-launch
 
 If the upstream rejects `reasoning_effort`, `claude-launch` retries once without that field.
 
+## Model mapping
+
+Claude Code still sends Anthropic model names such as `claude-sonnet-5`, `opus`, or a full Claude model id. `claude-launch` maps those names before calling the upstream OpenAI-compatible API.
+
+The default map is:
+
+```env
+CLAUDE_LAUNCH_MODEL_MAP_JSON={"*":"${CLAUDE_LAUNCH_MODEL}"}
+```
+
+For explicit aliases:
+
+```env
+CLAUDE_LAUNCH_MODEL=gpt-5.4
+CLAUDE_LAUNCH_CLI_MODEL=claude-sonnet-5
+CLAUDE_LAUNCH_MODEL_MAP_JSON={"*":"gpt-5.4","opus":"gpt-5.4","sonnet":"gpt-5.4","claude-opus-*":"gpt-5.4","claude-sonnet-*":"gpt-5.4"}
+```
+
+`CLAUDE_LAUNCH_VERBOSE=1` prints the active model map at startup.
+
 ## Streaming
 
 `claude-launch` supports both:
@@ -114,6 +137,7 @@ This covers Claude Code `-p` and `--output-format stream-json` flows.
 claude-launch
 claude-launch -c
 claude-launch -p "reply with ok"
+claude-launch exec "reply with ok"
 claude-launch -p --verbose --output-format stream-json "reply with ok"
 claude-launch --model claude-opus-4.1 --effort max
 CLAUDE_LAUNCH_VERBOSE=1 claude-launch
@@ -134,6 +158,23 @@ Optional debug files under `CLAUDE_LAUNCH_DEBUG_DIR`:
 - `incoming_request.json`
 - `outgoing_openai_request.json`
 - `failed_request.json`
+- `<request_id>-incoming_request.json`
+- `<request_id>-outgoing_openai_request-attempt-1.json`
+- `<request_id>-failed_request.json`
+
+For model-routing issues, enable:
+
+```env
+CLAUDE_LAUNCH_DEBUG_DIR=/root/projects/claude-launch/logs
+CLAUDE_LAUNCH_CAPTURE_LOG=1
+CLAUDE_LAUNCH_CAPTURE_LOG_FILE=/root/projects/claude-launch/logs/capture.jsonl
+```
+
+Then inspect:
+
+```bash
+tail -n 50 /root/projects/claude-launch/logs/capture.jsonl
+```
 
 ## Notes
 

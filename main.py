@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import os
+import fnmatch
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,10 +41,13 @@ _REQUIRED_KEYS = (
 TARGET_BASE_URL: str = ""
 TARGET_MODEL: str = ""
 TARGET_API_KEY: str = ""
+MODEL_MAP: dict[str, str] = {}
 CLAUDE_CLI_MODEL: str = "claude-sonnet-5"
 CLAUDE_CLI_EFFORT: str = ""
 CLAUDE_BIN: str = "claude"
 DEBUG_DIR: str = ""
+CAPTURE_LOG_ENABLED: bool = False
+CAPTURE_LOG_FILE: str = ""
 UPSTREAM_USER_AGENT: str = "curl/8.5.0"
 DEFAULT_REASONING_EFFORT: str = ""
 LOCAL_PROXY_API_KEY: str = "claude-launch-local"
@@ -87,6 +92,49 @@ def _parse_dotenv(path: str) -> dict[str, str]:
     except OSError:
         pass
     return out
+
+
+def _parse_model_map(raw: str, *, fallback_model: str) -> dict[str, str]:
+    text = (raw or "").strip()
+    if not text:
+        return {"*": fallback_model}
+
+    parsed: Any
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = {}
+        for item in text.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" in item:
+                key, value = item.split(":", 1)
+            elif "=" in item:
+                key, value = item.split("=", 1)
+            else:
+                continue
+            key = key.strip()
+            value = value.strip()
+            if key and value:
+                parsed[key] = value
+
+    if not isinstance(parsed, dict):
+        return {"*": fallback_model}
+
+    model_map: dict[str, str] = {}
+    for key, value in parsed.items():
+        normalized_key = str(key or "").strip()
+        normalized_value = str(value or "").strip()
+        if normalized_key and normalized_value:
+            model_map[normalized_key] = normalized_value
+    if "*" not in model_map:
+        model_map["*"] = fallback_model
+    return model_map
+
+
+def _env_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _candidate_env_paths() -> list[str]:
@@ -149,8 +197,9 @@ def load_dotenv_files(*, override_existing: bool = False) -> list[str]:
 
 
 def load_config() -> None:
-    global TARGET_BASE_URL, TARGET_MODEL, TARGET_API_KEY
+    global TARGET_BASE_URL, TARGET_MODEL, TARGET_API_KEY, MODEL_MAP
     global CLAUDE_CLI_MODEL, CLAUDE_CLI_EFFORT, CLAUDE_BIN, DEBUG_DIR
+    global CAPTURE_LOG_ENABLED, CAPTURE_LOG_FILE
     global UPSTREAM_USER_AGENT, DEFAULT_REASONING_EFFORT, LOCAL_PROXY_API_KEY
     global LOCAL_MODEL_DISPLAY_NAME, _LOADED_ENV_FILES
 
@@ -180,6 +229,12 @@ def load_config() -> None:
     TARGET_BASE_URL = os.environ["CLAUDE_LAUNCH_BASE_URL"].strip().rstrip("/")
     TARGET_MODEL = os.environ["CLAUDE_LAUNCH_MODEL"].strip()
     TARGET_API_KEY = os.environ["CLAUDE_LAUNCH_API_KEY"].strip()
+    MODEL_MAP = _parse_model_map(
+        os.environ.get("CLAUDE_LAUNCH_MODEL_MAP_JSON")
+        or os.environ.get("CLAUDE_LAUNCH_MODEL_MAP")
+        or "",
+        fallback_model=TARGET_MODEL,
+    )
     CLAUDE_CLI_MODEL = (os.environ.get("CLAUDE_LAUNCH_CLI_MODEL") or "claude-sonnet-5").strip()
     CLAUDE_CLI_EFFORT = (os.environ.get("CLAUDE_LAUNCH_CLI_EFFORT") or "").strip().lower()
     CLAUDE_BIN = (os.environ.get("CLAUDE_BIN") or "claude").strip()
@@ -192,6 +247,11 @@ def load_config() -> None:
     DEBUG_DIR = (
         os.environ.get("CLAUDE_LAUNCH_DEBUG_DIR")
         or os.path.join(tempfile.gettempdir(), "claude-launch")
+    ).strip()
+    CAPTURE_LOG_ENABLED = _env_truthy(os.environ.get("CLAUDE_LAUNCH_CAPTURE_LOG"))
+    CAPTURE_LOG_FILE = (
+        os.environ.get("CLAUDE_LAUNCH_CAPTURE_LOG_FILE")
+        or os.path.join(DEBUG_DIR, "capture.jsonl")
     ).strip()
 
     if CLAUDE_CLI_EFFORT and CLAUDE_CLI_EFFORT not in _VALID_CLAUDE_EFFORTS:
@@ -221,6 +281,60 @@ def _debug_write(name: str, obj: Any) -> None:
                 f.write(obj)
             else:
                 json.dump(obj, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _redact_headers(headers: Any) -> dict[str, str]:
+    sensitive = {
+        "authorization",
+        "proxy-authorization",
+        "x-api-key",
+        "anthropic-api-key",
+        "anthropic-auth-token",
+    }
+    out: dict[str, str] = {}
+    try:
+        items = headers.items()
+    except Exception:
+        items = []
+    for key, value in items:
+        key_str = str(key)
+        if key_str.lower() in sensitive:
+            out[key_str] = "[redacted]"
+        else:
+            out[key_str] = str(value)
+    return out
+
+
+def _payload_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    messages = payload.get("messages") if isinstance(payload, dict) else None
+    tools = payload.get("tools") if isinstance(payload, dict) else None
+    return {
+        "model": payload.get("model"),
+        "stream": payload.get("stream"),
+        "max_tokens": payload.get("max_tokens"),
+        "reasoning_effort": payload.get("reasoning_effort"),
+        "output_config": payload.get("output_config"),
+        "message_count": len(messages) if isinstance(messages, list) else 0,
+        "tool_count": len(tools) if isinstance(tools, list) else 0,
+    }
+
+
+def _capture_log(event: str, data: dict[str, Any]) -> None:
+    if not CAPTURE_LOG_ENABLED:
+        return
+    try:
+        log_dir = os.path.dirname(CAPTURE_LOG_FILE)
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        record = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "event": event,
+            **data,
+        }
+        with open(CAPTURE_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
     except Exception:
         pass
 
@@ -513,6 +627,20 @@ def resolve_reasoning_effort(payload: dict[str, Any]) -> str:
     return DEFAULT_REASONING_EFFORT
 
 
+def resolve_target_model(requested_model: Any) -> str:
+    requested = str(requested_model or "").strip()
+    if requested and requested in MODEL_MAP:
+        return MODEL_MAP[requested]
+    requested_lower = requested.lower()
+    for key, value in MODEL_MAP.items():
+        if key.lower() == requested_lower:
+            return value
+    for key, value in MODEL_MAP.items():
+        if key != "*" and "*" in key and fnmatch.fnmatchcase(requested_lower, key.lower()):
+            return value
+    return MODEL_MAP.get("*") or TARGET_MODEL
+
+
 def anthropic_payload_to_openai(payload: dict[str, Any], *, stream: bool) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     system_text = convert_anthropic_system_to_text(payload.get("system"))
@@ -524,7 +652,7 @@ def anthropic_payload_to_openai(payload: dict[str, Any], *, stream: bool) -> dic
         messages = [{"role": "user", "content": "(empty request)"}]
 
     openai_payload: dict[str, Any] = {
-        "model": TARGET_MODEL,
+        "model": resolve_target_model(payload.get("model")),
         "messages": messages,
         "stream": stream,
     }
@@ -948,6 +1076,20 @@ def _has_flag(args: list[str], name: str) -> bool:
     return any(arg == name or arg.startswith(name + "=") for arg in args)
 
 
+def prepare_claude_args(args: list[str]) -> list[str]:
+    prepared = list(args)
+    if prepared and prepared[0] == "exec":
+        prepared = prepared[1:]
+        if not _has_flag(prepared, "--print") and "-p" not in prepared:
+            prepared = ["-p", *prepared]
+
+    if not _has_flag(prepared, "--model") and CLAUDE_CLI_MODEL:
+        prepared = ["--model", CLAUDE_CLI_MODEL, *prepared]
+    if not _has_flag(prepared, "--effort") and CLAUDE_CLI_EFFORT:
+        prepared = ["--effort", CLAUDE_CLI_EFFORT, *prepared]
+    return prepared
+
+
 class TranslationProxy(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -1154,6 +1296,7 @@ class TranslationProxy(BaseHTTPRequestHandler):
         openai_payload: dict[str, Any],
         *,
         stream: bool,
+        request_id: str,
     ) -> Any:
         api_url = f"{TARGET_BASE_URL}/chat/completions"
         attempts = [openai_payload]
@@ -1165,6 +1308,17 @@ class TranslationProxy(BaseHTTPRequestHandler):
         last_error: Exception | None = None
         for idx, payload in enumerate(attempts):
             _debug_write("outgoing_openai_request.json", payload)
+            _debug_write(f"{request_id}-outgoing_openai_request-attempt-{idx + 1}.json", payload)
+            _capture_log(
+                "upstream_request",
+                {
+                    "request_id": request_id,
+                    "attempt": idx + 1,
+                    "url": api_url,
+                    "stream": stream,
+                    "summary": _payload_summary(payload),
+                },
+            )
             req = urllib.request.Request(
                 api_url,
                 data=json.dumps(payload).encode("utf-8"),
@@ -1177,9 +1331,28 @@ class TranslationProxy(BaseHTTPRequestHandler):
                 method="POST",
             )
             try:
-                return urllib.request.urlopen(req, timeout=600)
+                response = urllib.request.urlopen(req, timeout=600)
+                _capture_log(
+                    "upstream_response",
+                    {
+                        "request_id": request_id,
+                        "attempt": idx + 1,
+                        "status": getattr(response, "status", None),
+                        "headers": _redact_headers(response.headers),
+                    },
+                )
+                return response
             except urllib.error.HTTPError as exc:
                 last_error = exc
+                _capture_log(
+                    "upstream_http_error",
+                    {
+                        "request_id": request_id,
+                        "attempt": idx + 1,
+                        "status": exc.code,
+                        "reason": str(exc),
+                    },
+                )
                 if idx + 1 >= len(attempts):
                     raise
                 if exc.code != 400:
@@ -1203,6 +1376,7 @@ class TranslationProxy(BaseHTTPRequestHandler):
         raise RuntimeError("unreachable")
 
     def _handle_messages(self, raw_body: bytes) -> None:
+        request_id = uuid.uuid4().hex[:12]
         try:
             payload = json.loads(raw_body.decode("utf-8") or "{}")
         except Exception as exc:
@@ -1210,14 +1384,38 @@ class TranslationProxy(BaseHTTPRequestHandler):
             return
 
         _debug_write("incoming_request.json", payload)
+        _debug_write(f"{request_id}-incoming_request.json", payload)
+        _capture_log(
+            "anthropic_request",
+            {
+                "request_id": request_id,
+                "path": self.path,
+                "headers": _redact_headers(self.headers),
+                "summary": _payload_summary(payload),
+            },
+        )
 
         wants_stream = bool(payload.get("stream")) or "text/event-stream" in (
             self.headers.get("Accept") or ""
         ).lower()
         openai_payload = anthropic_payload_to_openai(payload, stream=wants_stream)
+        _capture_log(
+            "model_mapping",
+            {
+                "request_id": request_id,
+                "anthropic_model": payload.get("model"),
+                "upstream_model": openai_payload.get("model"),
+                "model_map": MODEL_MAP,
+                "wants_stream": wants_stream,
+            },
+        )
 
         try:
-            with self._perform_upstream_request(openai_payload, stream=wants_stream) as response:
+            with self._perform_upstream_request(
+                openai_payload,
+                stream=wants_stream,
+                request_id=request_id,
+            ) as response:
                 content_type = (response.headers.get("Content-Type") or "").lower()
 
                 if wants_stream:
@@ -1261,6 +1459,24 @@ class TranslationProxy(BaseHTTPRequestHandler):
                     "payload": openai_payload,
                 },
             )
+            _debug_write(
+                f"{request_id}-failed_request.json",
+                {
+                    "error": str(exc),
+                    "status": exc.code,
+                    "response_body": err_body,
+                    "payload": openai_payload,
+                },
+            )
+            _capture_log(
+                "request_failed",
+                {
+                    "request_id": request_id,
+                    "status": exc.code,
+                    "error": str(exc),
+                    "response_body_preview": err_body[:1000],
+                },
+            )
             message = f"Upstream API Error: HTTP {exc.code}"
             if err_body:
                 message += f"\n{err_body}"
@@ -1279,6 +1495,20 @@ class TranslationProxy(BaseHTTPRequestHandler):
                 {
                     "error": str(exc),
                     "payload": openai_payload,
+                },
+            )
+            _debug_write(
+                f"{request_id}-failed_request.json",
+                {
+                    "error": str(exc),
+                    "payload": openai_payload,
+                },
+            )
+            _capture_log(
+                "request_failed",
+                {
+                    "request_id": request_id,
+                    "error": str(exc),
                 },
             )
             message = f"Upstream API Error: {exc}"
@@ -1305,18 +1535,16 @@ def main() -> None:
     env["CLAUDE_CODE_USE_GATEWAY"] = "0"
     env.pop("ANTHROPIC_AUTH_TOKEN", None)
 
-    args = sys.argv[1:]
-    if not _has_flag(args, "--model") and CLAUDE_CLI_MODEL:
-        args = ["--model", CLAUDE_CLI_MODEL, *args]
-    if not _has_flag(args, "--effort") and CLAUDE_CLI_EFFORT:
-        args = ["--effort", CLAUDE_CLI_EFFORT, *args]
+    args = prepare_claude_args(sys.argv[1:])
 
     if os.environ.get("CLAUDE_LAUNCH_VERBOSE"):
         env_note = ", ".join(_LOADED_ENV_FILES) if _LOADED_ENV_FILES else "(none)"
+        map_note = ", ".join(f"{key}->{value}" for key, value in sorted(MODEL_MAP.items()))
         print(
             f"[claude-launch] proxy=http://127.0.0.1:{port} "
             f"upstream={TARGET_BASE_URL}/chat/completions "
-            f"upstream_model={TARGET_MODEL} cli_model={CLAUDE_CLI_MODEL}\n"
+            f"default_upstream_model={TARGET_MODEL} cli_model={CLAUDE_CLI_MODEL}\n"
+            f"[claude-launch] model map: {map_note}\n"
             f"[claude-launch] env files: {env_note}",
             file=sys.stderr,
         )
