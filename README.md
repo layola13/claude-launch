@@ -151,9 +151,9 @@ CLAUDE_LAUNCH_MODEL_MAP_JSON={"*":"${CLAUDE_LAUNCH_MODEL}"}
 For explicit aliases:
 
 ```env
-CLAUDE_LAUNCH_MODEL=gpt-5.4
+CLAUDE_LAUNCH_MODEL=gpt-5.5
 CLAUDE_LAUNCH_CLI_MODEL=claude-sonnet-5
-CLAUDE_LAUNCH_MODEL_MAP_JSON={"*":"gpt-5.4","opus":"gpt-5.4","sonnet":"gpt-5.4","claude-opus-*":"gpt-5.4","claude-sonnet-*":"gpt-5.4"}
+CLAUDE_LAUNCH_MODEL_MAP_JSON={"*":"gpt-5.5","opus":"gpt-5.5","sonnet":"gpt-5.5","claude-opus-*":"gpt-5.5","claude-sonnet-*":"gpt-5.5"}
 ```
 
 `CLAUDE_LAUNCH_VERBOSE=1` prints the active model map at startup.
