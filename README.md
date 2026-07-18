@@ -21,6 +21,41 @@ See [COPYRIGHT](COPYRIGHT).
 4. Translates `POST /v1/messages` to `POST {base}/chat/completions`.
 5. Converts OpenAI responses back into Anthropic message JSON or Anthropic SSE.
 
+## Why claude-launch
+
+`claude-launch` is intentionally small: no Docker, no LiteLLM, no FastAPI, no uv runtime, and no desktop app. It is a pure Python standard-library launcher/proxy that keeps the common path to three core settings:
+
+- `CLAUDE_LAUNCH_BASE_URL`
+- `CLAUDE_LAUNCH_MODEL`
+- `CLAUDE_LAUNCH_API_KEY`
+
+Run `./install.sh`, then use `claude-launch` as the command that starts Claude Code through the local translator. It only launches Claude Code and routes API traffic; it does not automate repository operations such as `git push`.
+
+### Compared with proxy-style alternatives
+
+| Project | Config complexity | Dependencies | Install / start | Lightweight | Best for |
+|---------|-------------------|--------------|-----------------|-------------|----------|
+| `claude-launch` | Almost zero: mainly 3 env vars | Almost zero: Python standard library only | `./install.sh` -> `claude-launch` | ★★★★★ | Users who want the simplest local CLI proxy |
+| `1rgs/claude-code-proxy` | Medium: `.env` plus LiteLLM config | LiteLLM plus uv / Docker | `uv run` / Docker | ★★★ | Users who need multi-model routing or Gemini support |
+| LiteLLM Proxy | Medium-high: many gateway options | LiteLLM stack | pip / uv plus uvicorn | ★★ | Teams building a full AI gateway |
+| Other small proxies | Medium | Often LiteLLM / FastAPI based | Usually a separate server process | ★★★ | Varies by proxy |
+
+`claude-launch` gives up full gateway features in exchange for the shortest path from Claude Code to an OpenAI-compatible `/chat/completions` backend.
+
+### Compared with cc-switch
+
+| Dimension | `claude-launch` | cc-switch |
+|-----------|-----------------|-----------|
+| Type | Lightweight local proxy + CLI launcher | Cross-platform desktop GUI manager built with Tauri |
+| Core job | Translate Anthropic Messages API traffic to OpenAI-compatible Chat Completions and launch Claude Code | Manage provider configs, keys, MCP, and presets across tools like Claude Code, Codex, OpenCode, and Gemini CLI |
+| Config complexity | Almost zero: 3 core env vars | Low-medium: GUI switching and many presets, but requires installing a desktop app |
+| Dependencies | Almost zero: Python standard library only | Tauri / Rust desktop application stack |
+| Lightweight | ★★★★★ | ★★ |
+| Best for | Pure terminal users who want Claude Code plus a custom OpenAI-compatible backend | Users who want one visual app to manage multiple AI CLIs and providers |
+| Main advantage | Minimal terminal flow, no separate UI, no heavy proxy framework | Rich one-stop provider management, presets, hot switching, and visualization |
+
+cc-switch is a configuration manager; `claude-launch` is a protocol translation layer plus launcher. If you want a GUI to manage many AI tools, cc-switch is a better fit. If you want the smallest pure-terminal path for Claude Code to talk to a custom OpenAI-compatible backend, `claude-launch` is the focused option.
+
 ## Quick start
 
 ```bash
