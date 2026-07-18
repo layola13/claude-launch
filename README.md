@@ -60,6 +60,7 @@ Shell `export` still wins over any `.env` file.
 | `CLAUDE_LAUNCH_CLI_MODEL` | Injected as `claude --model` when you do not pass `--model`; default `claude-sonnet-5` |
 | `CLAUDE_LAUNCH_MODEL_MAP_JSON` | Maps Claude request model names to upstream model names; defaults to `{"*":"CLAUDE_LAUNCH_MODEL"}` |
 | `CLAUDE_LAUNCH_CLI_EFFORT` | Injected as `claude --effort` when you do not pass `--effort` |
+| `CLAUDE_LAUNCH_SETTING_SOURCES` | Injected as `claude --setting-sources`; default `user` |
 | `CLAUDE_LAUNCH_MODEL_DISPLAY_NAME` | Displayed by the local `/v1/models` route |
 | `CLAUDE_LAUNCH_USER_AGENT` | Upstream HTTP `User-Agent`; default `curl/8.5.0` |
 | `CLAUDE_LAUNCH_REASONING_EFFORT` | Fallback upstream `reasoning_effort` if the Claude request does not include one |
@@ -121,6 +122,28 @@ CLAUDE_LAUNCH_MODEL_MAP_JSON={"*":"gpt-5.4","opus":"gpt-5.4","sonnet":"gpt-5.4",
 ```
 
 `CLAUDE_LAUNCH_VERBOSE=1` prints the active model map at startup.
+
+## Settings isolation
+
+By default `claude-launch` starts Claude Code with:
+
+```bash
+--setting-sources user
+```
+
+This is intentional. Project settings can contain Anthropic auth env vars such as `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_BASE_URL`; if Claude Code loads those after `claude-launch` injects the local proxy env, the UI reports both auth methods and may bypass the proxy.
+
+To restore Claude Code's default settings loading:
+
+```env
+CLAUDE_LAUNCH_SETTING_SOURCES=default
+```
+
+To explicitly include project settings:
+
+```env
+CLAUDE_LAUNCH_SETTING_SOURCES=user,project,local
+```
 
 ## Streaming
 

@@ -44,6 +44,7 @@ TARGET_API_KEY: str = ""
 MODEL_MAP: dict[str, str] = {}
 CLAUDE_CLI_MODEL: str = "claude-sonnet-5"
 CLAUDE_CLI_EFFORT: str = ""
+CLAUDE_SETTING_SOURCES: str = "user"
 CLAUDE_BIN: str = "claude"
 DEBUG_DIR: str = ""
 CAPTURE_LOG_ENABLED: bool = False
@@ -198,7 +199,8 @@ def load_dotenv_files(*, override_existing: bool = False) -> list[str]:
 
 def load_config() -> None:
     global TARGET_BASE_URL, TARGET_MODEL, TARGET_API_KEY, MODEL_MAP
-    global CLAUDE_CLI_MODEL, CLAUDE_CLI_EFFORT, CLAUDE_BIN, DEBUG_DIR
+    global CLAUDE_CLI_MODEL, CLAUDE_CLI_EFFORT, CLAUDE_SETTING_SOURCES
+    global CLAUDE_BIN, DEBUG_DIR
     global CAPTURE_LOG_ENABLED, CAPTURE_LOG_FILE
     global UPSTREAM_USER_AGENT, DEFAULT_REASONING_EFFORT, LOCAL_PROXY_API_KEY
     global LOCAL_MODEL_DISPLAY_NAME, _LOADED_ENV_FILES
@@ -237,6 +239,9 @@ def load_config() -> None:
     )
     CLAUDE_CLI_MODEL = (os.environ.get("CLAUDE_LAUNCH_CLI_MODEL") or "claude-sonnet-5").strip()
     CLAUDE_CLI_EFFORT = (os.environ.get("CLAUDE_LAUNCH_CLI_EFFORT") or "").strip().lower()
+    CLAUDE_SETTING_SOURCES = (
+        os.environ.get("CLAUDE_LAUNCH_SETTING_SOURCES") or "user"
+    ).strip()
     CLAUDE_BIN = (os.environ.get("CLAUDE_BIN") or "claude").strip()
     UPSTREAM_USER_AGENT = (os.environ.get("CLAUDE_LAUNCH_USER_AGENT") or "curl/8.5.0").strip()
     DEFAULT_REASONING_EFFORT = (os.environ.get("CLAUDE_LAUNCH_REASONING_EFFORT") or "").strip().lower()
@@ -1083,6 +1088,12 @@ def prepare_claude_args(args: list[str]) -> list[str]:
         if not _has_flag(prepared, "--print") and "-p" not in prepared:
             prepared = ["-p", *prepared]
 
+    if (
+        CLAUDE_SETTING_SOURCES
+        and CLAUDE_SETTING_SOURCES.lower() not in {"default", "inherit"}
+        and not _has_flag(prepared, "--setting-sources")
+    ):
+        prepared = ["--setting-sources", CLAUDE_SETTING_SOURCES, *prepared]
     if not _has_flag(prepared, "--model") and CLAUDE_CLI_MODEL:
         prepared = ["--model", CLAUDE_CLI_MODEL, *prepared]
     if not _has_flag(prepared, "--effort") and CLAUDE_CLI_EFFORT:
@@ -1543,7 +1554,8 @@ def main() -> None:
         print(
             f"[claude-launch] proxy=http://127.0.0.1:{port} "
             f"upstream={TARGET_BASE_URL}/chat/completions "
-            f"default_upstream_model={TARGET_MODEL} cli_model={CLAUDE_CLI_MODEL}\n"
+            f"default_upstream_model={TARGET_MODEL} cli_model={CLAUDE_CLI_MODEL} "
+            f"setting_sources={CLAUDE_SETTING_SOURCES or '(claude default)'}\n"
             f"[claude-launch] model map: {map_note}\n"
             f"[claude-launch] env files: {env_note}",
             file=sys.stderr,

@@ -16,6 +16,7 @@ class TranslationTests(unittest.TestCase):
         main.MODEL_MAP = {"*": "gpt-5.4"}
         main.CLAUDE_CLI_MODEL = "claude-sonnet-5"
         main.CLAUDE_CLI_EFFORT = ""
+        main.CLAUDE_SETTING_SOURCES = "user"
         main.DEFAULT_REASONING_EFFORT = ""
         main.LOCAL_MODEL_DISPLAY_NAME = "gpt-5.4"
 
@@ -123,7 +124,29 @@ class TranslationTests(unittest.TestCase):
 
         args = main.prepare_claude_args(["exec", "hello"])
 
-        self.assertEqual(args, ["--effort", "high", "--model", "claude-sonnet-5", "-p", "hello"])
+        self.assertEqual(
+            args,
+            [
+                "--effort",
+                "high",
+                "--model",
+                "claude-sonnet-5",
+                "--setting-sources",
+                "user",
+                "-p",
+                "hello",
+            ],
+        )
+
+    def test_existing_setting_sources_are_preserved(self) -> None:
+        main.CLAUDE_SETTING_SOURCES = "user"
+
+        args = main.prepare_claude_args(["--setting-sources", "user,project,local", "-p", "hello"])
+
+        self.assertEqual(
+            args,
+            ["--model", "claude-sonnet-5", "--setting-sources", "user,project,local", "-p", "hello"],
+        )
 
     def test_openai_response_becomes_anthropic_message(self) -> None:
         response = main.openai_response_to_anthropic(
