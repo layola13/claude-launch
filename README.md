@@ -71,6 +71,8 @@ claude-launch -p --verbose --output-format stream-json "hello"
 ```
 `./install.sh` also auto-installs the upstream CLI when it is missing (use `--skip-cli` to opt out).
 
+Claude Code is installed via the **official native installer** (`curl -fsSL https://claude.ai/install.sh | bash`); the npm package is deprecated.
+
 ### Project-local `.env`
 
 ```bash

@@ -139,11 +139,32 @@ ensure_required_cli() {
   echo "docs: https://docs.anthropic.com/en/docs/claude-code/setup"
   echo "attempting automatic install..."
 
-  if have_cmd curl || have_cmd wget; then
-    run_curl_bash "https://claude.ai/install.sh" "Claude Code" || true
+  # Official path: native installer (strongly recommended). npm package is deprecated.
+  if ! have_cmd curl && ! have_cmd wget; then
+    echo "error: curl or wget required for official Claude Code install:" >&2
+    echo "  curl -fsSL https://claude.ai/install.sh | bash" >&2
+    echo "docs: https://docs.anthropic.com/en/docs/claude-code/setup" >&2
+    return 1
   fi
+  if ! run_curl_bash "https://claude.ai/install.sh" "Claude Code (native)"; then
+    echo "error: official Claude Code installer failed." >&2
+    echo "  curl -fsSL https://claude.ai/install.sh | bash" >&2
+    echo "docs: https://docs.anthropic.com/en/docs/claude-code/setup" >&2
+    return 1
+  fi
+  # Native installer may place binary under ~/.local/bin or Claude's own bin dir
+  ensure_path_bin "${HOME}/.local/bin"
+  ensure_path_bin "${HOME}/.claude/bin"
+  hash -r 2>/dev/null || true
   if ! have_cmd claude; then
-    run_npm_global "@anthropic-ai/claude-code"
+    echo "warning: native install finished but 'claude' not on PATH yet." >&2
+    echo "trying deprecated npm fallback (@anthropic-ai/claude-code) only as last resort..." >&2
+    if ! run_npm_global "@anthropic-ai/claude-code"; then
+      echo "error: 'claude' still not on PATH after official install." >&2
+      echo "  curl -fsSL https://claude.ai/install.sh | bash" >&2
+      echo "docs: https://docs.anthropic.com/en/docs/claude-code/setup" >&2
+      return 1
+    fi
   fi
   if ! have_cmd claude; then
     echo "error: 'claude' still not on PATH. See https://docs.anthropic.com/en/docs/claude-code/setup" >&2
