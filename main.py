@@ -35,12 +35,16 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _REQUIRED_KEYS = (
     "CLAUDE_LAUNCH_BASE_URL",
     "CLAUDE_LAUNCH_MODEL",
-    "CLAUDE_LAUNCH_API_KEY",
 )
 
 TARGET_BASE_URL: str = ""
 TARGET_MODEL: str = ""
 TARGET_API_KEY: str = ""
+API_KEYS: list[str] = []
+FROZEN_KEYS: dict[str, float] = {}
+FROZEN_LOCK = threading.Lock()
+MAX_COMPLETION_TOKENS: int = 0
+MAX_TOKENS: int = 0
 MODEL_MAP: dict[str, str] = {}
 CLAUDE_CLI_MODEL: str = "claude-sonnet-5"
 CLAUDE_CLI_EFFORT: str = ""
@@ -54,6 +58,43 @@ DEFAULT_REASONING_EFFORT: str = ""
 LOCAL_PROXY_API_KEY: str = "claude-launch-local"
 LOCAL_MODEL_DISPLAY_NAME: str = ""
 _LOADED_ENV_FILES: list[str] = []
+
+import time
+
+def get_active_key() -> str:
+    with FROZEN_LOCK:
+        now = time.time()
+        for key in API_KEYS:
+            if FROZEN_KEYS.get(key, 0) <= now:
+                return key
+        
+        candidates = []
+        for key in API_KEYS:
+            expire = FROZEN_KEYS.get(key, 0)
+            if expire - now < 43200: # less than 12 hours
+                candidates.append((expire, key))
+                
+        if candidates:
+            candidates.sort()
+            expire, key = candidates[0]
+            FROZEN_KEYS[key] = 0
+            return key
+            
+        return API_KEYS[0]
+
+
+def mark_key_failed(key: str, status_code: int) -> None:
+    with FROZEN_LOCK:
+        now = time.time()
+        if status_code == 429:
+            FROZEN_KEYS[key] = now + 60
+            print(f"[claude-launch] key {key[:10]}... frozen temporarily (429 rate limit) for 60s", file=sys.stderr)
+        elif status_code in (401, 402):
+            FROZEN_KEYS[key] = now + 86400
+            print(f"[claude-launch] key {key[:10]}... frozen permanently (401/402 auth error)", file=sys.stderr)
+        elif status_code in (502, 503, 504):
+            FROZEN_KEYS[key] = now + 30
+            print(f"[claude-launch] key {key[:10]}... frozen temporarily ({status_code} server error) for 30s", file=sys.stderr)
 
 _VALID_CLAUDE_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
@@ -198,16 +239,22 @@ def load_dotenv_files(*, override_existing: bool = False) -> list[str]:
 
 
 def load_config() -> None:
-    global TARGET_BASE_URL, TARGET_MODEL, TARGET_API_KEY, MODEL_MAP
+    global TARGET_BASE_URL, TARGET_MODEL, TARGET_API_KEY, API_KEYS
     global CLAUDE_CLI_MODEL, CLAUDE_CLI_EFFORT, CLAUDE_SETTING_SOURCES
     global CLAUDE_BIN, DEBUG_DIR
     global CAPTURE_LOG_ENABLED, CAPTURE_LOG_FILE
     global UPSTREAM_USER_AGENT, DEFAULT_REASONING_EFFORT, LOCAL_PROXY_API_KEY
     global LOCAL_MODEL_DISPLAY_NAME, _LOADED_ENV_FILES
+    global MAX_COMPLETION_TOKENS, MAX_TOKENS
 
     _LOADED_ENV_FILES = load_dotenv_files()
 
     missing = [key for key in _REQUIRED_KEYS if not (os.environ.get(key) or "").strip()]
+    keys_str = os.environ.get("CLAUDE_LAUNCH_API_KEYS") or os.environ.get("CLAUDE_LAUNCH_API_KEY") or ""
+    API_KEYS = [k.strip() for k in keys_str.split(",") if k.strip()]
+    if not API_KEYS:
+        missing.append("CLAUDE_LAUNCH_API_KEY (or CLAUDE_LAUNCH_API_KEYS)")
+
     if missing:
         example = os.path.join(_HERE, ".env.example")
         xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -230,7 +277,7 @@ def load_config() -> None:
 
     TARGET_BASE_URL = os.environ["CLAUDE_LAUNCH_BASE_URL"].strip().rstrip("/")
     TARGET_MODEL = os.environ["CLAUDE_LAUNCH_MODEL"].strip()
-    TARGET_API_KEY = os.environ["CLAUDE_LAUNCH_API_KEY"].strip()
+    TARGET_API_KEY = API_KEYS[0]
     MODEL_MAP = _parse_model_map(
         os.environ.get("CLAUDE_LAUNCH_MODEL_MAP_JSON")
         or os.environ.get("CLAUDE_LAUNCH_MODEL_MAP")
@@ -249,6 +296,16 @@ def load_config() -> None:
         os.environ.get("CLAUDE_LAUNCH_LOCAL_API_KEY") or "claude-launch-local"
     ).strip()
     LOCAL_MODEL_DISPLAY_NAME = (os.environ.get("CLAUDE_LAUNCH_MODEL_DISPLAY_NAME") or TARGET_MODEL).strip()
+    try:
+        MAX_COMPLETION_TOKENS = int(os.environ.get("CLAUDE_LAUNCH_MAX_COMPLETION_TOKENS") or "0")
+    except ValueError:
+        print("warning: CLAUDE_LAUNCH_MAX_COMPLETION_TOKENS must be an integer", file=sys.stderr)
+        MAX_COMPLETION_TOKENS = 0
+    try:
+        MAX_TOKENS = int(os.environ.get("CLAUDE_LAUNCH_MAX_TOKENS") or "0")
+    except ValueError:
+        print("warning: CLAUDE_LAUNCH_MAX_TOKENS must be an integer", file=sys.stderr)
+        MAX_TOKENS = 0
     DEBUG_DIR = (
         os.environ.get("CLAUDE_LAUNCH_DEBUG_DIR")
         or os.path.join(tempfile.gettempdir(), "claude-launch")
@@ -686,6 +743,11 @@ def anthropic_payload_to_openai(payload: dict[str, Any], *, stream: bool) -> dic
             openai_payload["tool_choice"] = tool_choice
         if parallel_tool_calls is not None:
             openai_payload["parallel_tool_calls"] = parallel_tool_calls
+
+    if "max_completion_tokens" not in openai_payload and MAX_COMPLETION_TOKENS > 0:
+        openai_payload["max_completion_tokens"] = MAX_COMPLETION_TOKENS
+    if "max_tokens" not in openai_payload and MAX_TOKENS > 0:
+        openai_payload["max_tokens"] = MAX_TOKENS
 
     return openai_payload
 
@@ -1316,72 +1378,83 @@ class TranslationProxy(BaseHTTPRequestHandler):
             retry_payload.pop("reasoning_effort", None)
             attempts.append(retry_payload)
 
-        last_error: Exception | None = None
-        for idx, payload in enumerate(attempts):
-            _debug_write("outgoing_openai_request.json", payload)
-            _debug_write(f"{request_id}-outgoing_openai_request-attempt-{idx + 1}.json", payload)
-            _capture_log(
-                "upstream_request",
-                {
-                    "request_id": request_id,
-                    "attempt": idx + 1,
-                    "url": api_url,
-                    "stream": stream,
-                    "summary": _payload_summary(payload),
-                },
-            )
-            req = urllib.request.Request(
-                api_url,
-                data=json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {TARGET_API_KEY}",
-                    "Accept": "text/event-stream" if stream else "application/json",
-                    "User-Agent": UPSTREAM_USER_AGENT,
-                },
-                method="POST",
-            )
-            try:
-                response = urllib.request.urlopen(req, timeout=600)
+        for key_attempt in range(len(API_KEYS)):
+            active_key = get_active_key()
+            last_error: Exception | None = None
+            for idx, payload in enumerate(attempts):
+                _debug_write("outgoing_openai_request.json", payload)
+                _debug_write(f"{request_id}-outgoing_openai_request-attempt-{idx + 1}.json", payload)
                 _capture_log(
-                    "upstream_response",
+                    "upstream_request",
                     {
                         "request_id": request_id,
                         "attempt": idx + 1,
-                        "status": getattr(response, "status", None),
-                        "headers": _redact_headers(response.headers),
+                        "url": api_url,
+                        "stream": stream,
+                        "summary": _payload_summary(payload),
                     },
                 )
-                return response
-            except urllib.error.HTTPError as exc:
-                last_error = exc
-                _capture_log(
-                    "upstream_http_error",
-                    {
-                        "request_id": request_id,
-                        "attempt": idx + 1,
-                        "status": exc.code,
-                        "reason": str(exc),
+                req = urllib.request.Request(
+                    api_url,
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={
+                        "Content-Type": "application/json",
+                        "Authorization": f"Bearer {active_key}",
+                        "Accept": "text/event-stream" if stream else "application/json",
+                        "User-Agent": UPSTREAM_USER_AGENT,
                     },
+                    method="POST",
                 )
-                if idx + 1 >= len(attempts):
-                    raise
-                if exc.code != 400:
-                    raise
                 try:
-                    body = exc.read().decode("utf-8", errors="replace")
-                except Exception:
-                    body = ""
-                if os.environ.get("CLAUDE_LAUNCH_VERBOSE"):
-                    print(
-                        "[claude-launch] retrying upstream without reasoning_effort after 400:",
-                        body[:400],
-                        file=sys.stderr,
+                    response = urllib.request.urlopen(req, timeout=600)
+                    _capture_log(
+                        "upstream_response",
+                        {
+                            "request_id": request_id,
+                            "attempt": idx + 1,
+                            "status": getattr(response, "status", None),
+                            "headers": _redact_headers(response.headers),
+                        },
                     )
-                continue
-            except Exception as exc:
-                last_error = exc
-                raise
+                    return response
+                except urllib.error.HTTPError as exc:
+                    last_error = exc
+                    _capture_log(
+                        "upstream_http_error",
+                        {
+                            "request_id": request_id,
+                            "attempt": idx + 1,
+                            "status": exc.code,
+                            "reason": str(exc),
+                        },
+                    )
+                    if exc.code in (401, 402, 429, 502, 503, 504):
+                        mark_key_failed(active_key, exc.code)
+                        break
+
+                    if idx + 1 >= len(attempts):
+                        raise
+                    if exc.code != 400:
+                        raise
+                    try:
+                        body = exc.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        body = ""
+                    if os.environ.get("CLAUDE_LAUNCH_VERBOSE"):
+                        print(
+                            "[claude-launch] retrying upstream without reasoning_effort after 400:",
+                            body[:400],
+                            file=sys.stderr,
+                        )
+                    continue
+                except Exception as exc:
+                    last_error = exc
+                    raise
+
+            if last_error and isinstance(last_error, urllib.error.HTTPError) and last_error.code in (401, 402, 429, 502, 503, 504):
+                if key_attempt < len(API_KEYS) - 1:
+                    continue
+
         if last_error is not None:
             raise last_error
         raise RuntimeError("unreachable")
