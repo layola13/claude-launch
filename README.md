@@ -60,6 +60,8 @@ cc-switch is a configuration manager; `claude-launch` is a protocol translation 
 
 ```bash
 ./install.sh
+
+
 $EDITOR ~/.config/claude-launch/.env
 export PATH="$HOME/.local/bin:$PATH"
 
@@ -67,6 +69,7 @@ claude-launch
 claude-launch -p "hello"
 claude-launch -p --verbose --output-format stream-json "hello"
 ```
+`./install.sh` also auto-installs the upstream CLI when it is missing (use `--skip-cli` to opt out).
 
 ### Project-local `.env`
 
