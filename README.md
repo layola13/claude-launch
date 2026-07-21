@@ -115,12 +115,14 @@ Shell `export` still wins over any `.env` file.
 
 ### `.env` load priority
 
-1. `CLAUDE_LAUNCH_ENV`
-2. `./.env` or `./.claude-launch.env`
-3. Parent directories up to 6 levels
-4. Repo-local `.env`
+1. `CLAUDE_LAUNCH_ENV` if set
+2. Package directory `.env` (launcher-local, next to `main.py`)
+3. `./.env` or `./.claude-launch.env` (cwd)
+4. Parent directories (up to 6 levels)
 5. `~/.config/claude-launch/.env`
 6. `~/.claude-launch.env`
+
+For claude-launch-managed keys (`CLAUDE_LAUNCH_*` and `CLAUDE_BIN`), higher-priority `.env` files override stale shell exports.
 
 ## Effort mapping
 
