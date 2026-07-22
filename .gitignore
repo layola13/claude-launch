@@ -1,4 +1,5 @@
 .env
+.env.bak
 .claude-launch.env
 __pycache__/
 tests/__pycache__/
